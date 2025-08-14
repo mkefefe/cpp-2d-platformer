@@ -6,17 +6,13 @@
 #include <memory>
 
 //----------------------------------------------------------------------------
-// 2D Platformer Implementation Skeleton
+// 2D Platformer Implementation Skeleton with Camera
 //----------------------------------------------------------------------------
-// This file is a C++20 skeleton for a complete 2D side‑scrolling platformer.
-// It follows the design described in the specification.  The comments in this
-// file reference the numbered sections of the spec (e.g., Section 0, 1, 2, …).
-// The goal is to provide a deterministic, fixed time step engine with all
-// logic, physics and rendering authored in C++ without external assets.  The
-// code below sets up an SDL2 window, implements a fixed timestep loop (Section 0)
-// and defines basic data structures for the player, physics and rendering.
-// Many details are omitted for brevity; however, the scaffolding is ready for
-// incremental development of the full game.
+// This updated skeleton adds a simple camera system that smoothly follows the
+// player using a critically damped spring (Section 2).  World rendering is
+// offset by the camera so that the player remains near the center of the
+// screen.  Other systems (physics, input, parallax) remain as in the
+// original skeleton, providing a foundation for further development.
 //
 
 // Section 0 – Global Targets & Constraints
@@ -48,14 +44,11 @@ struct Vec2 {
 };
 
 // Section 5 – Player Visual Design (simple silhouette)
-// In a full implementation, segments would be stored separately and animated.
-// For this skeleton we embed a tiny placeholder sprite (white box).
 static constexpr int PLAYER_W = 22;
 static constexpr int PLAYER_H = 32;
 static const std::array<uint32_t, PLAYER_W * PLAYER_H> PLAYER_PIXELS = []{
     std::array<uint32_t, PLAYER_W * PLAYER_H> data{};
     for (int i = 0; i < PLAYER_W * PLAYER_H; ++i) {
-        // Fill with opaque white (RGBA).  Real art would be defined here.
         data[i] = 0xFFFFFFFFu;
     }
     return data;
@@ -72,31 +65,59 @@ enum class PlayerState {
     Dash,
     Hurt,
     Dead
-    // Additional states (e.g., attacks, wall slide) can be added here
+    // Additional states can be added here
 };
 
 // Section 15 – Level Definition (tile map)
-// Here we embed a tiny level as a 2‑D array.  Each integer corresponds to a tile enum.
 static constexpr int LEVEL_WIDTH  = 32;
 static constexpr int LEVEL_HEIGHT = 16;
 static const std::array<uint8_t, LEVEL_WIDTH * LEVEL_HEIGHT> LEVEL_DATA = []{
-    // Construct a simple flat terrain: bottom row solid, others air.
     std::array<uint8_t, LEVEL_WIDTH * LEVEL_HEIGHT> data{};
     for (int y = 0; y < LEVEL_HEIGHT; ++y) {
         for (int x = 0; x < LEVEL_WIDTH; ++x) {
-            data[y * LEVEL_WIDTH + x] = (y == LEVEL_HEIGHT - 1) ? 1 /*SOLID*/ : 0 /*AIR*/;
+            data[y * LEVEL_WIDTH + x] = (y == LEVEL_HEIGHT - 1) ? 1 : 0;
         }
     }
     return data;
 }();
 
-// Helper to sample a tile at (x,y)
 uint8_t getTile(int x, int y) {
-    if (x < 0 || y < 0 || x >= LEVEL_WIDTH || y >= LEVEL_HEIGHT) return 1; // Treat out of bounds as solid
+    if (x < 0 || y < 0 || x >= LEVEL_WIDTH || y >= LEVEL_HEIGHT) return 1;
     return LEVEL_DATA[y * LEVEL_WIDTH + x];
 }
 
-// Section 7/8 – Player Movement & Jumping (basic implementation)
+// Section 2 – Camera (smooth follow)
+struct Camera {
+    Vec2 position{};
+    Vec2 velocity{};
+    // Update camera using a critically damped spring toward target
+    void update(const Vec2& target, float dt) {
+        // Compute desired position so that target appears near center of screen
+        Vec2 desired{ target.x - NATIVE_W * 0.5f + PLAYER_W * 0.5f,
+                      target.y - NATIVE_H * 0.5f + PLAYER_H * 0.5f };
+        float stiffness = 60.0f;      // spring stiffness
+        float damping   = 2.0f * std::sqrt(stiffness); // critical damping
+        // Spring force
+        Vec2 diff{ desired.x - position.x, desired.y - position.y };
+        velocity.x += diff.x * stiffness * dt;
+        velocity.y += diff.y * stiffness * dt;
+        // Damping
+        velocity.x *= std::exp(-damping * dt);
+        velocity.y *= std::exp(-damping * dt);
+        // Integrate
+        position.x += velocity.x * dt;
+        position.y += velocity.y * dt;
+        // Clamp to level bounds (Section 2 – Bounds)
+        if (position.x < 0) position.x = 0;
+        if (position.y < 0) position.y = 0;
+        float maxX = LEVEL_WIDTH * TILE_SIZE - NATIVE_W;
+        float maxY = LEVEL_HEIGHT * TILE_SIZE - NATIVE_H;
+        if (position.x > maxX) position.x = maxX;
+        if (position.y > maxY) position.y = maxY;
+    }
+};
+
+// Section 7/8 – Player Movement & Jumping
 struct Player {
     Vec2 position{};
     Vec2 velocity{};
@@ -106,96 +127,66 @@ struct Player {
     float coyoteTimer{ 0.0f };
 
     void update(float dt) {
-        // Advance timers (Section 4)
         if (jumpBufferTimer > 0.0f) jumpBufferTimer -= dt;
         if (coyoteTimer     > 0.0f) coyoteTimer     -= dt;
-
-        // Input sampling (placeholder – replace with actual keyboard handling)
         const Uint8* keys = SDL_GetKeyboardState(nullptr);
         bool left  = keys[SDL_SCANCODE_LEFT] || keys[SDL_SCANCODE_A];
         bool right = keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_D];
         bool jump  = keys[SDL_SCANCODE_SPACE];
-
-        // Horizontal movement
         float desiredAccel = 0.0f;
         if (left ^ right) {
             desiredAccel = (left ? -1.0f : 1.0f) * (onGround ? GROUND_ACCEL : AIR_ACCEL);
         } else {
-            // Decelerate toward zero
             if (onGround) {
-                if (velocity.x > 0.0f) {
-                    desiredAccel = -GROUND_DECEL;
-                } else if (velocity.x < 0.0f) {
-                    desiredAccel = GROUND_DECEL;
-                }
+                if (velocity.x > 0.0f) desiredAccel = -GROUND_DECEL;
+                else if (velocity.x < 0.0f) desiredAccel = GROUND_DECEL;
             } else {
-                if (velocity.x > 0.0f) {
-                    desiredAccel = -AIR_DECEL;
-                } else if (velocity.x < 0.0f) {
-                    desiredAccel = AIR_DECEL;
-                }
+                if (velocity.x > 0.0f) desiredAccel = -AIR_DECEL;
+                else if (velocity.x < 0.0f) desiredAccel = AIR_DECEL;
             }
         }
         velocity.x += desiredAccel * dt;
-        // Clamp speed
         if (velocity.x >  MAX_RUN_SPEED) velocity.x =  MAX_RUN_SPEED;
         if (velocity.x < -MAX_RUN_SPEED) velocity.x = -MAX_RUN_SPEED;
-
-        // Jump buffering & coyote (Section 8)
         if (jump) {
-            jumpBufferTimer = 0.09f; // 90 ms buffer
+            jumpBufferTimer = 0.09f;
         }
         if (jumpBufferTimer > 0.0f && (onGround || coyoteTimer > 0.0f)) {
-            // Launch jump
             velocity.y = JUMP_V0;
             onGround = false;
             jumpBufferTimer = 0.0f;
             coyoteTimer = 0.0f;
         }
-
-        // Apply gravity
         velocity.y += GRAVITY * dt;
-        // Integrate position
         Vec2 newPos = position;
         newPos.x += velocity.x * dt;
         newPos.y += velocity.y * dt;
-
-        // Collision detection (very simple AABB vs tile; Section 3/14)
-        // Sweep Y
+        // Y collisions
         if (velocity.y > 0.0f) {
-            // Falling – check tiles below
             int bottom = (int)((newPos.y + PLAYER_H) / TILE_SIZE);
-            int leftTile  = (int)((newPos.x)            / TILE_SIZE);
+            int leftTile  = (int)(newPos.x / TILE_SIZE);
             int rightTile = (int)((newPos.x + PLAYER_W - 1) / TILE_SIZE);
             bool collides = false;
             for (int tx = leftTile; tx <= rightTile; ++tx) {
-                if (getTile(tx, bottom) == 1) {
-                    collides = true;
-                    break;
-                }
+                if (getTile(tx, bottom) == 1) { collides = true; break; }
             }
             if (collides) {
-                // Snap to tile boundary
                 newPos.y = bottom * TILE_SIZE - PLAYER_H;
                 velocity.y = 0.0f;
                 onGround = true;
-                coyoteTimer = 0.1f; // allow jump shortly after leaving
+                coyoteTimer = 0.1f;
             }
         } else if (velocity.y < 0.0f) {
-            // Rising – check head collisions (omitted for brevity)
+            // upward collision (omitted)
         }
-
-        // Sweep X (very naive; Section 14)
-        int top = (int)((newPos.y) / TILE_SIZE);
+        // X collisions
+        int top = (int)(newPos.y / TILE_SIZE);
         int bottomY = (int)((newPos.y + PLAYER_H - 1) / TILE_SIZE);
         if (velocity.x > 0.0f) {
             int rightTile = (int)((newPos.x + PLAYER_W) / TILE_SIZE);
             bool collides = false;
             for (int ty = top; ty <= bottomY; ++ty) {
-                if (getTile(rightTile, ty) == 1) {
-                    collides = true;
-                    break;
-                }
+                if (getTile(rightTile, ty) == 1) { collides = true; break; }
             }
             if (collides) {
                 newPos.x = rightTile * TILE_SIZE - PLAYER_W;
@@ -205,46 +196,34 @@ struct Player {
             int leftTile = (int)(newPos.x / TILE_SIZE);
             bool collides = false;
             for (int ty = top; ty <= bottomY; ++ty) {
-                if (getTile(leftTile, ty) == 1) {
-                    collides = true;
-                    break;
-                }
+                if (getTile(leftTile, ty) == 1) { collides = true; break; }
             }
             if (collides) {
                 newPos.x = (leftTile + 1) * TILE_SIZE;
                 velocity.x = 0.0f;
             }
         }
-
         position = newPos;
-
-        // Update state machine (simplified)
+        // State update
         if (!onGround) {
             state = (velocity.y < 0.0f) ? PlayerState::JumpRise : PlayerState::Fall;
         } else {
-            if (std::abs(velocity.x) > 1.0f) {
-                state = PlayerState::Run;
-            } else {
-                state = PlayerState::Idle;
-            }
+            state = (std::abs(velocity.x) > 1.0f) ? PlayerState::Run : PlayerState::Idle;
         }
     }
 
-    void draw(SDL_Renderer* renderer, float scale) const {
-        // Render the embedded pixel data (Section 1)
+    void draw(SDL_Renderer* renderer, float scale, Vec2 cam) const {
         SDL_Rect dst;
-        dst.x = static_cast<int>(position.x * scale);
-        dst.y = static_cast<int>(position.y * scale);
-        dst.w = static_cast<int>(PLAYER_W * scale);
-        dst.h = static_cast<int>(PLAYER_H * scale);
-        // Create an SDL surface from the pixel array
+        dst.x = (int)((position.x - cam.x) * scale);
+        dst.y = (int)((position.y - cam.y) * scale);
+        dst.w = (int)(PLAYER_W * scale);
+        dst.h = (int)(PLAYER_H * scale);
         SDL_Surface* surface = SDL_CreateRGBSurfaceFrom(
             (void*)PLAYER_PIXELS.data(),
             PLAYER_W, PLAYER_H,
             32,
             PLAYER_W * sizeof(uint32_t),
-            0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000
-        );
+            0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000);
         SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer, surface);
         SDL_FreeSurface(surface);
         SDL_RenderCopy(renderer, tex, nullptr, &dst);
@@ -252,13 +231,12 @@ struct Player {
     }
 };
 
-// Entry point (Section 0 – Global Targets & Constraints)
+// Entry point
 int main(int, char**) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return 1;
     }
-    // RAII wrappers for window and renderer (Section 0 – Style: RAII)
     std::unique_ptr<SDL_Window, decltype(&SDL_DestroyWindow)>
         window(SDL_CreateWindow("2D Platformer",
                                 SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -271,10 +249,9 @@ int main(int, char**) {
         SDL_Log("Failed to create window or renderer");
         return 1;
     }
-
     Player player;
     player.position = { 100.0f, 100.0f };
-
+    Camera camera;
     bool running = true;
     float accumulator = 0.0f;
     Uint64 prevTicks = SDL_GetPerformanceCounter();
@@ -283,36 +260,32 @@ int main(int, char**) {
         float frameTime = (currentTicks - prevTicks) / (float)SDL_GetPerformanceFrequency();
         prevTicks = currentTicks;
         accumulator += frameTime;
-        // Handle events
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_QUIT) {
-                running = false;
-            }
+            if (ev.type == SDL_QUIT) running = false;
         }
-        // Fixed update loop (never drop logic frames; Section 0)
         while (accumulator >= FIXED_DT) {
             player.update(FIXED_DT);
+            camera.update(player.position, FIXED_DT);
             accumulator -= FIXED_DT;
         }
-        // Render
-        SDL_SetRenderDrawColor(renderer.get(), 92, 148, 252, 255); // background sky color
+        SDL_SetRenderDrawColor(renderer.get(), 92, 148, 252, 255);
         SDL_RenderClear(renderer.get());
-        // Draw simple ground (Section 16 – Parallax & Atmosphere omitted)
+        // Draw ground offset by camera
         SDL_SetRenderDrawColor(renderer.get(), 70, 70, 70, 255);
         for (int y = 0; y < LEVEL_HEIGHT; ++y) {
             for (int x = 0; x < LEVEL_WIDTH; ++x) {
-                if (getTile(x,y) == 1) {
+                if (getTile(x, y) == 1) {
                     SDL_Rect r;
-                    r.x = x * TILE_SIZE * 2;
-                    r.y = y * TILE_SIZE * 2;
+                    r.x = (int)((x * TILE_SIZE - camera.position.x) * 2);
+                    r.y = (int)((y * TILE_SIZE - camera.position.y) * 2);
                     r.w = TILE_SIZE * 2;
                     r.h = TILE_SIZE * 2;
                     SDL_RenderFillRect(renderer.get(), &r);
                 }
             }
         }
-        player.draw(renderer.get(), 2.0f); // Upscale by 2x for clarity
+        player.draw(renderer.get(), 2.0f, camera.position);
         SDL_RenderPresent(renderer.get());
     }
     SDL_Quit();
